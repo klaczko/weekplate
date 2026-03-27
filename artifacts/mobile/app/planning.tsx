@@ -66,28 +66,82 @@ export default function PlanningScreen() {
     });
   };
 
-  const handlePickPhoto = async () => {
-    try {
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: "images",
-        quality: 0.7,
-        base64: true,
-      });
-      if (result.canceled || !result.assets?.[0]?.base64) return;
-      setAiLoading(true);
-      const data = await extractIngredientsFromImage(result.assets[0].base64!);
-      if (data?.ingredients?.length) {
-        const existing = fridgeInput.trim();
-        const newItems = data.ingredients.join(", ");
-        setFridgeInput(existing ? `${existing}, ${newItems}` : newItems);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      } else {
-        Alert.alert("No ingredients found", "Try a clearer photo of your fridge or ingredients.");
-      }
-    } catch {
-      Alert.alert("Error", "Could not open camera.");
+  const processImage = async (base64: string) => {
+    setAiLoading(true);
+    const data = await extractIngredientsFromImage(base64);
+    if (data?.ingredients?.length) {
+      const existing = fridgeInput.trim();
+      const newItems = data.ingredients.join(", ");
+      setFridgeInput(existing ? `${existing}, ${newItems}` : newItems);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } else {
+      Alert.alert("No ingredients found", "Try a clearer photo of your fridge or ingredients.");
     }
     setAiLoading(false);
+  };
+
+  const handlePickPhoto = () => {
+    if (Platform.OS === "web") {
+      Alert.alert("Photo input", "Use the gallery to pick a photo of your fridge.", [
+        {
+          text: "Choose from Gallery",
+          onPress: async () => {
+            try {
+              const result = await ImagePicker.launchImageLibraryAsync({
+                mediaTypes: "images",
+                quality: 0.7,
+                base64: true,
+              });
+              if (!result.canceled && result.assets?.[0]?.base64) {
+                await processImage(result.assets[0].base64!);
+              }
+            } catch {
+              Alert.alert("Error", "Could not open gallery.");
+            }
+          },
+        },
+        { text: "Cancel", style: "cancel" },
+      ]);
+      return;
+    }
+
+    Alert.alert("Add fridge photo", "How would you like to add a photo?", [
+      {
+        text: "Take Photo",
+        onPress: async () => {
+          try {
+            const result = await ImagePicker.launchCameraAsync({
+              mediaTypes: "images",
+              quality: 0.7,
+              base64: true,
+            });
+            if (!result.canceled && result.assets?.[0]?.base64) {
+              await processImage(result.assets[0].base64!);
+            }
+          } catch {
+            Alert.alert("Error", "Could not open camera.");
+          }
+        },
+      },
+      {
+        text: "Choose from Gallery",
+        onPress: async () => {
+          try {
+            const result = await ImagePicker.launchImageLibraryAsync({
+              mediaTypes: "images",
+              quality: 0.7,
+              base64: true,
+            });
+            if (!result.canceled && result.assets?.[0]?.base64) {
+              await processImage(result.assets[0].base64!);
+            }
+          } catch {
+            Alert.alert("Error", "Could not open gallery.");
+          }
+        },
+      },
+      { text: "Cancel", style: "cancel" },
+    ]);
   };
 
   const handleVoiceInput = () => {
