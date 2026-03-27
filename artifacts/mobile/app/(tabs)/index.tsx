@@ -201,7 +201,7 @@ export default function TodayScreen() {
       <View style={[styles.container, { paddingTop: topPad }]}>
         <View style={styles.header}>
           <Text style={styles.greeting}>
-            {weekend ? "Weekend Mode" : "Good morning"}
+            {weekend ? "Weekend Mode 🌿" : "Hey,"}
           </Text>
           <Text style={styles.dateText}>
             {getDayName(today)}, {getMonthDay(today)}

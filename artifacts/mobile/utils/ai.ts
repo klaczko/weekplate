@@ -16,6 +16,52 @@ export async function extractRecipeFromUrl(url: string) {
   }
 }
 
+export async function extractIngredientsFromImage(base64: string, mimeType = "image/jpeg") {
+  try {
+    const resp = await fetch(`${API_BASE}/ai/extract-from-image`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base64, mimeType }),
+    });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function extractIngredientsFromText(text: string) {
+  try {
+    const resp = await fetch(`${API_BASE}/ai/extract-ingredients-text`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function categorizeRecipe(params: {
+  name: string;
+  ingredients: string[];
+  steps: string[];
+}) {
+  try {
+    const resp = await fetch(`${API_BASE}/ai/categorize-recipe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
 export async function generateWeekPlan(params: {
   cookingDays: string[];
   fridgeItems: string[];

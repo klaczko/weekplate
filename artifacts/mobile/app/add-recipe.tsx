@@ -7,7 +7,6 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   TextInput,
   View,
@@ -16,13 +15,36 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import * as Haptics from "expo-haptics";
-import Colors, { NutritionalGroups } from "@/constants/colors";
+import Colors from "@/constants/colors";
 import { useApp } from "@/context/AppContext";
 import { Recipe, RecipeCategory } from "@/context/AppContext";
-import { extractRecipeFromUrl } from "@/utils/ai";
+import { extractRecipeFromUrl, categorizeRecipe } from "@/utils/ai";
 import { generateId } from "@/utils/dates";
 
 type Mode = "url" | "manual";
+
+function parseIngredientsText(raw: string) {
+  return raw
+    .split(/[\n,]+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^([\d./]+\s*\w*)\s+(.+)$/);
+      if (match) {
+        const [, amountUnit, name] = match;
+        const [amount, ...unitParts] = amountUnit.trim().split(" ");
+        return { name: name.trim(), amount, unit: unitParts.join(" ") };
+      }
+      return { name: line, amount: "", unit: "" };
+    });
+}
+
+function parseStepsText(raw: string) {
+  return raw
+    .split(/\n+/)
+    .map((line) => line.replace(/^\d+[.)]\s*/, "").trim())
+    .filter(Boolean);
+}
 
 export default function AddRecipeScreen() {
   const insets = useSafeAreaInsets();
@@ -33,17 +55,15 @@ export default function AddRecipeScreen() {
   const [mode, setMode] = useState<Mode>("url");
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const [name, setName] = useState("");
   const [category, setCategory] = useState<RecipeCategory>("main");
   const [prepTime, setPrepTime] = useState("");
   const [portions, setPortions] = useState("2");
   const [categoryTags, setCategoryTags] = useState<string[]>([]);
-  const [nutritionalGroups, setNutritionalGroups] = useState<Record<string, boolean>>({});
-  const [ingredients, setIngredients] = useState<{ name: string; amount: string; unit: string }[]>([
-    { name: "", amount: "", unit: "" },
-  ]);
-  const [steps, setSteps] = useState<string[]>([""]);
+  const [ingredientsText, setIngredientsText] = useState("");
+  const [stepsText, setStepsText] = useState("");
 
   const handleUrlExtract = async () => {
     if (!url.trim()) return;
@@ -56,21 +76,29 @@ export default function AddRecipeScreen() {
         setPrepTime(String(data.prepTime ?? ""));
         setPortions(String(data.portions ?? 2));
         setCategoryTags(data.categoryTags ?? []);
-        setNutritionalGroups(data.nutritionalGroups ?? {});
-        setIngredients(
-          data.ingredients?.length
-            ? data.ingredients.map((i: any) => ({
-                name: i.name ?? "",
-                amount: String(i.amount ?? ""),
-                unit: i.unit ?? "",
-              }))
-            : [{ name: "", amount: "", unit: "" }]
-        );
-        setSteps(data.steps?.length ? data.steps : [""]);
+        if (data.ingredients?.length) {
+          setIngredientsText(
+            data.ingredients
+              .map((i: any) =>
+                [i.amount, i.unit, i.name].filter(Boolean).join(" ")
+              )
+              .join("\n")
+          );
+        }
+        if (data.steps?.length) {
+          setStepsText(
+            data.steps
+              .map((s: string, i: number) => `${i + 1}. ${s}`)
+              .join("\n")
+          );
+        }
         setMode("manual");
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } else {
-        Alert.alert("Could not extract", "Please fill in the recipe manually.");
+        Alert.alert(
+          "Could not extract",
+          "Please fill in the recipe manually."
+        );
         setMode("manual");
       }
     } catch {
@@ -80,10 +108,27 @@ export default function AddRecipeScreen() {
     setLoading(false);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!name.trim()) {
       Alert.alert("Missing name", "Please enter a recipe name.");
       return;
+    }
+
+    setSaving(true);
+    const parsedIngredients = parseIngredientsText(ingredientsText);
+    const parsedSteps = parseStepsText(stepsText);
+
+    let nutritionalGroups: Record<string, boolean> = {};
+    try {
+      const result = await categorizeRecipe({
+        name: name.trim(),
+        ingredients: parsedIngredients.map((i) => i.name),
+        steps: parsedSteps,
+      });
+      if (result?.nutritionalGroups) {
+        nutritionalGroups = result.nutritionalGroups;
+      }
+    } catch {
     }
 
     const recipe: Recipe = {
@@ -94,21 +139,20 @@ export default function AddRecipeScreen() {
       portions: portions ? parseInt(portions) : undefined,
       categoryTags,
       nutritionalGroups,
-      ingredients: ingredients
-        .filter((i) => i.name.trim())
-        .map((i) => ({ name: i.name, amount: i.amount, unit: i.unit || undefined })),
-      steps: steps.filter((s) => s.trim()),
+      ingredients: parsedIngredients.filter((i) => i.name.trim()),
+      steps: parsedSteps,
       sourceUrl: url || undefined,
       isFavorite: false,
     };
 
     addRecipe(recipe);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setSaving(false);
     router.back();
   };
 
   const categories: RecipeCategory[] = ["salad", "main", "side"];
-  const cuisineTags = ["Mediterranean", "Brazilian", "Asian", "American", "Italian", "Mexican"];
+  const cuisineTags = ["Mediterranean", "Brazilian"];
 
   return (
     <KeyboardAvoidingView
@@ -121,8 +165,16 @@ export default function AddRecipeScreen() {
             <Ionicons name="close" size={22} color={Colors.text} />
           </Pressable>
           <Text style={styles.navTitle}>Add Recipe</Text>
-          <Pressable style={styles.saveBtn} onPress={handleSave}>
-            <Text style={styles.saveBtnText}>Save</Text>
+          <Pressable
+            style={[styles.saveBtn, saving && styles.saveBtnLoading]}
+            onPress={handleSave}
+            disabled={saving}
+          >
+            {saving ? (
+              <ActivityIndicator size="small" color={Colors.background} />
+            ) : (
+              <Text style={styles.saveBtnText}>Save</Text>
+            )}
           </Pressable>
         </View>
 
@@ -136,20 +188,35 @@ export default function AddRecipeScreen() {
               size={14}
               color={mode === "url" ? Colors.background : Colors.textSecondary}
             />
-            <Text style={[styles.modeTabText, mode === "url" && styles.modeTabTextActive]}>
+            <Text
+              style={[
+                styles.modeTabText,
+                mode === "url" && styles.modeTabTextActive,
+              ]}
+            >
               URL Import
             </Text>
           </Pressable>
           <Pressable
-            style={[styles.modeTab, mode === "manual" && styles.modeTabActive]}
+            style={[
+              styles.modeTab,
+              mode === "manual" && styles.modeTabActive,
+            ]}
             onPress={() => setMode("manual")}
           >
             <Ionicons
               name="create-outline"
               size={14}
-              color={mode === "manual" ? Colors.background : Colors.textSecondary}
+              color={
+                mode === "manual" ? Colors.background : Colors.textSecondary
+              }
             />
-            <Text style={[styles.modeTabText, mode === "manual" && styles.modeTabTextActive]}>
+            <Text
+              style={[
+                styles.modeTabText,
+                mode === "manual" && styles.modeTabTextActive,
+              ]}
+            >
               Manual
             </Text>
           </Pressable>
@@ -164,13 +231,18 @@ export default function AddRecipeScreen() {
           {mode === "url" ? (
             <View style={styles.urlSection}>
               <Text style={styles.urlHint}>
-                Paste a recipe URL and AI will extract all the details automatically
+                Paste a recipe URL — works with Panelinha, TudoGostoso, and
+                English sites. AI extracts everything automatically.
               </Text>
               <View style={styles.urlInput}>
-                <Ionicons name="link-outline" size={18} color={Colors.textMuted} />
+                <Ionicons
+                  name="link-outline"
+                  size={18}
+                  color={Colors.textMuted}
+                />
                 <TextInput
                   style={styles.urlTextInput}
-                  placeholder="https://..."
+                  placeholder="https://panelinha.com.br/..."
                   placeholderTextColor={Colors.textMuted}
                   value={url}
                   onChangeText={setUrl}
@@ -179,14 +251,21 @@ export default function AddRecipeScreen() {
                 />
               </View>
               <Pressable
-                style={[styles.extractBtn, loading && styles.extractBtnDisabled]}
+                style={[
+                  styles.extractBtn,
+                  loading && styles.extractBtnDisabled,
+                ]}
                 onPress={handleUrlExtract}
                 disabled={loading}
               >
                 {loading ? (
                   <ActivityIndicator size="small" color={Colors.background} />
                 ) : (
-                  <Ionicons name="sparkles-outline" size={18} color={Colors.background} />
+                  <Ionicons
+                    name="sparkles-outline"
+                    size={18}
+                    color={Colors.background}
+                  />
                 )}
                 <Text style={styles.extractBtnText}>
                   {loading ? "Extracting..." : "Extract Recipe"}
@@ -207,7 +286,7 @@ export default function AddRecipeScreen() {
                   style={styles.textInput}
                   value={name}
                   onChangeText={setName}
-                  placeholder="e.g. Roasted Salmon with Lemon"
+                  placeholder="e.g. Salmão Assado com Limão"
                   placeholderTextColor={Colors.textMuted}
                 />
               </View>
@@ -265,7 +344,7 @@ export default function AddRecipeScreen() {
               </View>
 
               <View style={styles.card}>
-                <Text style={styles.fieldLabel}>Cuisine Tags</Text>
+                <Text style={styles.fieldLabel}>Cuisine</Text>
                 <View style={styles.tagsWrap}>
                   {cuisineTags.map((tag) => (
                     <Pressable
@@ -285,7 +364,8 @@ export default function AddRecipeScreen() {
                       <Text
                         style={[
                           styles.tagChipText,
-                          categoryTags.includes(tag) && styles.tagChipTextActive,
+                          categoryTags.includes(tag) &&
+                            styles.tagChipTextActive,
                         ]}
                       >
                         {tag}
@@ -296,129 +376,48 @@ export default function AddRecipeScreen() {
               </View>
 
               <View style={styles.card}>
-                <Text style={styles.fieldLabel}>Nutritional Groups</Text>
-                {NutritionalGroups.map((group) => (
-                  <View key={group.key} style={styles.nutritionRow}>
-                    <Ionicons
-                      name={group.icon as any}
-                      size={16}
-                      color={nutritionalGroups[group.key] ? Colors.teal : Colors.textMuted}
-                    />
-                    <Text
-                      style={[
-                        styles.nutritionLabel,
-                        { color: nutritionalGroups[group.key] ? Colors.text : Colors.textSecondary },
-                      ]}
-                    >
-                      {group.label}
-                    </Text>
-                    <Switch
-                      value={!!nutritionalGroups[group.key]}
-                      onValueChange={(v) =>
-                        setNutritionalGroups((prev) => ({ ...prev, [group.key]: v }))
-                      }
-                      trackColor={{ false: Colors.cardBorder, true: Colors.tealDark }}
-                      thumbColor={nutritionalGroups[group.key] ? Colors.teal : Colors.textMuted}
-                    />
-                  </View>
-                ))}
+                <Text style={styles.fieldLabel}>Ingredients</Text>
+                <Text style={styles.fieldHint}>
+                  One per line or comma-separated. Include amounts and units.
+                </Text>
+                <TextInput
+                  style={styles.bigInput}
+                  value={ingredientsText}
+                  onChangeText={setIngredientsText}
+                  placeholder={"200g chicken breast\n2 cloves garlic\n1 lemon\nolive oil"}
+                  placeholderTextColor={Colors.textMuted}
+                  multiline
+                  numberOfLines={7}
+                  textAlignVertical="top"
+                />
               </View>
 
               <View style={styles.card}>
-                <View style={styles.sectionTitleRow}>
-                  <Text style={styles.fieldLabel}>Ingredients</Text>
-                  <Pressable
-                    onPress={() =>
-                      setIngredients((prev) => [...prev, { name: "", amount: "", unit: "" }])
-                    }
-                  >
-                    <Ionicons name="add-circle-outline" size={22} color={Colors.teal} />
-                  </Pressable>
-                </View>
-                {ingredients.map((ing, i) => (
-                  <View key={i} style={styles.ingredientRow}>
-                    <TextInput
-                      style={[styles.textInput, { flex: 2 }]}
-                      value={ing.name}
-                      onChangeText={(v) =>
-                        setIngredients((prev) =>
-                          prev.map((p, idx) => (idx === i ? { ...p, name: v } : p))
-                        )
-                      }
-                      placeholder="Ingredient"
-                      placeholderTextColor={Colors.textMuted}
-                    />
-                    <TextInput
-                      style={[styles.textInput, { flex: 1 }]}
-                      value={ing.amount}
-                      onChangeText={(v) =>
-                        setIngredients((prev) =>
-                          prev.map((p, idx) => (idx === i ? { ...p, amount: v } : p))
-                        )
-                      }
-                      placeholder="Amount"
-                      placeholderTextColor={Colors.textMuted}
-                      keyboardType="numeric"
-                    />
-                    <TextInput
-                      style={[styles.textInput, { flex: 1 }]}
-                      value={ing.unit}
-                      onChangeText={(v) =>
-                        setIngredients((prev) =>
-                          prev.map((p, idx) => (idx === i ? { ...p, unit: v } : p))
-                        )
-                      }
-                      placeholder="Unit"
-                      placeholderTextColor={Colors.textMuted}
-                    />
-                    {ingredients.length > 1 && (
-                      <Pressable
-                        onPress={() =>
-                          setIngredients((prev) => prev.filter((_, idx) => idx !== i))
-                        }
-                      >
-                        <Ionicons name="close-circle" size={20} color={Colors.textMuted} />
-                      </Pressable>
-                    )}
-                  </View>
-                ))}
+                <Text style={styles.fieldLabel}>Steps</Text>
+                <Text style={styles.fieldHint}>
+                  One step per line. Numbering is optional.
+                </Text>
+                <TextInput
+                  style={styles.bigInput}
+                  value={stepsText}
+                  onChangeText={setStepsText}
+                  placeholder={"Season chicken with salt and pepper.\nHeat olive oil in a pan over medium heat.\nCook chicken for 6 minutes each side."}
+                  placeholderTextColor={Colors.textMuted}
+                  multiline
+                  numberOfLines={7}
+                  textAlignVertical="top"
+                />
               </View>
 
-              <View style={styles.card}>
-                <View style={styles.sectionTitleRow}>
-                  <Text style={styles.fieldLabel}>Steps</Text>
-                  <Pressable onPress={() => setSteps((prev) => [...prev, ""])}>
-                    <Ionicons name="add-circle-outline" size={22} color={Colors.teal} />
-                  </Pressable>
-                </View>
-                {steps.map((step, i) => (
-                  <View key={i} style={styles.stepRow}>
-                    <View style={styles.stepNum}>
-                      <Text style={styles.stepNumText}>{i + 1}</Text>
-                    </View>
-                    <TextInput
-                      style={[styles.textInput, { flex: 1 }]}
-                      value={step}
-                      onChangeText={(v) =>
-                        setSteps((prev) =>
-                          prev.map((p, idx) => (idx === i ? v : p))
-                        )
-                      }
-                      placeholder={`Step ${i + 1}...`}
-                      placeholderTextColor={Colors.textMuted}
-                      multiline
-                    />
-                    {steps.length > 1 && (
-                      <Pressable
-                        onPress={() =>
-                          setSteps((prev) => prev.filter((_, idx) => idx !== i))
-                        }
-                      >
-                        <Ionicons name="close-circle" size={20} color={Colors.textMuted} />
-                      </Pressable>
-                    )}
-                  </View>
-                ))}
+              <View style={styles.aiNote}>
+                <Ionicons
+                  name="sparkles-outline"
+                  size={14}
+                  color={Colors.teal}
+                />
+                <Text style={styles.aiNoteText}>
+                  Nutritional groups are auto-detected by AI when you save
+                </Text>
               </View>
             </>
           )}
@@ -455,7 +454,11 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     paddingHorizontal: 18,
     paddingVertical: 8,
+    minWidth: 64,
+    alignItems: "center",
+    justifyContent: "center",
   },
+  saveBtnLoading: { opacity: 0.7 },
   saveBtnText: {
     fontFamily: "Montserrat_700Bold",
     fontSize: 14,
@@ -538,7 +541,7 @@ const styles = StyleSheet.create({
     padding: 14,
     borderWidth: 1,
     borderColor: Colors.cardBorder,
-    gap: 10,
+    gap: 8,
   },
   fieldLabel: {
     fontFamily: "Montserrat_600SemiBold",
@@ -546,7 +549,13 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     textTransform: "uppercase",
     letterSpacing: 0.5,
-    marginBottom: 2,
+  },
+  fieldHint: {
+    fontFamily: "Montserrat_400Regular",
+    fontSize: 12,
+    color: Colors.textMuted,
+    marginTop: -4,
+    lineHeight: 17,
   },
   textInput: {
     backgroundColor: Colors.cardElevated,
@@ -558,6 +567,19 @@ const styles = StyleSheet.create({
     color: Colors.text,
     borderWidth: 1,
     borderColor: Colors.cardBorder,
+  },
+  bigInput: {
+    backgroundColor: Colors.cardElevated,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    fontFamily: "Montserrat_400Regular",
+    fontSize: 14,
+    color: Colors.text,
+    borderWidth: 1,
+    borderColor: Colors.cardBorder,
+    minHeight: 130,
+    lineHeight: 22,
   },
   inlineFields: { flexDirection: "row", gap: 10 },
   inlineField: { flex: 1, gap: 6 },
@@ -581,8 +603,8 @@ const styles = StyleSheet.create({
   tagsWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   tagChip: {
     borderRadius: 20,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
+    paddingHorizontal: 18,
+    paddingVertical: 9,
     backgroundColor: Colors.cardElevated,
     borderWidth: 1,
     borderColor: Colors.cardBorder,
@@ -590,39 +612,23 @@ const styles = StyleSheet.create({
   tagChipActive: { backgroundColor: Colors.tealMuted, borderColor: Colors.teal },
   tagChipText: {
     fontFamily: "Montserrat_500Medium",
-    fontSize: 12,
+    fontSize: 13,
     color: Colors.textSecondary,
   },
   tagChipTextActive: { color: Colors.teal },
-  nutritionRow: {
+  aiNote: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-  },
-  nutritionLabel: {
-    fontFamily: "Montserrat_400Regular",
-    fontSize: 14,
-    flex: 1,
-  },
-  sectionTitleRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  ingredientRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  stepRow: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
-  stepNum: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
+    gap: 8,
     backgroundColor: Colors.tealMuted,
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 10,
+    borderRadius: 10,
+    padding: 12,
   },
-  stepNumText: {
-    fontFamily: "Montserrat_700Bold",
+  aiNoteText: {
+    fontFamily: "Montserrat_400Regular",
     fontSize: 12,
     color: Colors.teal,
+    flex: 1,
+    lineHeight: 18,
   },
 });
